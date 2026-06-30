@@ -1,0 +1,38 @@
+# Terraform state files — contain sensitive values (API keys, tokens)
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Local variable files — may contain sensitive config
+terraform.tfvars
+*.tfvars
+!**/example.tfvars
+
+# Terraform working directories
+.terraform/
+.terraform.lock.hcl
+
+# Terraform plan files
+tfplan
+*.tfplan
+
+# Credentials and secrets
+.env
+*.pem
+*.key
+*.p12
+*.json.key
+service-account.json
+credentials.json
+application_default_credentials.json
+
+# Ops output
+crash.log
+crash.*.log
+terraform.log
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp
+*.swo

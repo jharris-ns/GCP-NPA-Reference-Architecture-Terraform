@@ -1,0 +1,193 @@
+#!/bin/bash
+# NPA Publisher startup script — runs on first boot.
+#
+# Execution order:
+#   1. Wait for the GCP metadata server to be reachable
+#   2. Apply GCP-specific system settings (/tmp permissions, .nonat pre-seed)
+#   3. Optionally install the Google Cloud Ops Agent (must run before bootstrap
+#      because bootstrap.sh removes curl and wget as security hardening)
+#   4. Download and run the Netskope bootstrap script (~5-10 min)
+#      bootstrap.sh: installs Docker, pulls publisher container, starts it,
+#      extracts npa_publisher_wizard, sets up GCP .nonat mode, hardens the OS
+#   5. Fetch the registration token from Secret Manager using Python 3 urllib
+#      (curl is unavailable post-bootstrap; Python 3 is part of the base image)
+#   6. Register the publisher with the Netskope tenant
+#
+# The registration token is retrieved using the VM's service account identity
+# via the GCP metadata server. It never transits the Terraform operator workstation.
+#
+# Template variables (injected by Terraform templatefile()):
+#   enable_monitoring — bool: install the Google Cloud Ops Agent
+#   secret_name       — Secret Manager secret ID containing the registration token
+#   project_id        — GCP project ID
+#   publisher_name    — Publisher name (used in log messages only)
+
+set -euo pipefail
+
+LOG_TAG="npa-publisher-startup"
+
+log() {
+  local msg
+  msg="$(date -u '+%Y-%m-%dT%H:%M:%SZ') [$LOG_TAG] $*"
+  echo "$msg"
+  logger -t "$LOG_TAG" "$*" || true
+}
+
+log "=== NPA Publisher startup script starting for ${publisher_name} ==="
+
+# ─── Wait for GCP metadata server ─────────────────────────────────────────────
+# Use Python 3 urllib — curl is removed by bootstrap.sh (security hardening)
+# so this check must work on both first boot and VM reset.
+log "Waiting for GCP metadata server..."
+for attempt in $(seq 1 20); do
+  if python3 -c "
+import urllib.request, sys
+try:
+    req = urllib.request.Request(
+        'http://metadata.google.internal/',
+        headers={'Metadata-Flavor': 'Google'})
+    urllib.request.urlopen(req, timeout=3)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+    log "Metadata server is reachable."
+    break
+  fi
+  if [ "$attempt" -eq 20 ]; then
+    log "ERROR: Metadata server not reachable after 60 seconds. Exiting."
+    exit 1
+  fi
+  sleep 3
+done
+
+# ─── GCP-specific system settings ─────────────────────────────────────────────
+
+# /tmp must be world-writable for the Netskope publisher process.
+log "Setting /tmp permissions to 777..."
+chmod 777 /tmp
+
+# Pre-seed the .nonat flag before the bootstrap runs so the publisher container
+# starts with No NAT mode already in place. bootstrap.sh also calls
+# configure_nonat_mode_for_gcp, which creates the same file — this is belt-and-suspenders.
+log "Pre-seeding No NAT mode flag (GCP MTU 1460 workaround)..."
+mkdir -p /home/ubuntu/resources
+touch /home/ubuntu/resources/.nonat
+chown -R ubuntu:ubuntu /home/ubuntu/resources
+
+# ─── Google Cloud Ops Agent ───────────────────────────────────────────────────
+# Must run BEFORE bootstrap: bootstrap.sh removes curl and wget (security hardening),
+# and the Ops Agent installer requires curl to download packages.
+%{ if enable_monitoring ~}
+log "Installing Google Cloud Ops Agent..."
+curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+bash add-google-cloud-ops-agent-repo.sh --also-install
+rm -f add-google-cloud-ops-agent-repo.sh
+systemctl enable --now google-cloud-ops-agent
+log "Ops Agent installed and started."
+%{ endif ~}
+
+# ─── Install Netskope NPA Publisher software ──────────────────────────────────
+# Skip bootstrap on VM reset — Docker and the wizard are already installed.
+# bootstrap.sh removes curl and wget (security hardening), so it cannot be
+# re-downloaded on a subsequent boot. Re-running bootstrap is also unnecessary
+# because it would reinstall software that is already present.
+#
+# On first boot, curl is still available so bootstrap can be fetched.
+# bootstrap.sh resolves the install user via two variables it reads from the
+# environment (both fall back to `logname`, which fails with no login session):
+#
+#   bootstrap.sh:       ORIGINAL_USER=$${SUDO_USER:-$(logname)}   (cwd check)
+#   provision_shared.sh: INSTALL_USER=$${PUBLISHER_USER:-$(logname)} (install path)
+#
+# Exporting both bypasses logname so the bootstrap treats this as an
+# interactive `curl ... | sudo bash` invocation by the ubuntu user.
+if command -v docker &>/dev/null && [ -f /home/ubuntu/npa_publisher_wizard ]; then
+  log "Publisher software already installed (VM reset). Skipping bootstrap."
+else
+  log "Downloading and running Netskope Publisher bootstrap script..."
+  cd /home/ubuntu
+  export SUDO_USER=ubuntu
+  export PUBLISHER_USER=ubuntu
+  curl -fsSL \
+    "https://s3-us-west-2.amazonaws.com/publisher.netskope.com/latest/generic/bootstrap.sh" \
+    | bash
+  log "Bootstrap script completed. Docker container started, wizard extracted."
+fi
+
+# ─── Fetch registration token from Secret Manager ─────────────────────────────
+# IMPORTANT: curl and wget are removed by bootstrap.sh (security hardening).
+# All HTTP calls below use Python 3's built-in urllib — no external dependencies.
+#
+# The retry loop (30 attempts × 5 s = 150 s) also serves as the
+# "wait for Secret Manager" check that previously used curl.
+log "Fetching registration token from Secret Manager (secret: ${secret_name})..."
+
+TOKEN=$(python3 - << 'PYEOF'
+import urllib.request, json, base64, sys, time
+
+PROJECT_ID = "${project_id}"
+SECRET_NAME = "${secret_name}"
+
+def get_access_token():
+    req = urllib.request.Request(
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+        headers={"Metadata-Flavor": "Google"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())["access_token"]
+
+def get_secret(access_token):
+    url = (
+        "https://secretmanager.googleapis.com/v1/projects/"
+        + PROJECT_ID + "/secrets/" + SECRET_NAME + "/versions/latest:access"
+    )
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + access_token})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        data = json.loads(r.read())
+        return base64.b64decode(data["payload"]["data"]).decode("utf-8").strip()
+
+last_err = None
+for attempt in range(30):
+    try:
+        token = get_secret(get_access_token())
+        print(token)
+        sys.exit(0)
+    except Exception as e:
+        last_err = e
+        time.sleep(5)
+
+sys.stderr.write(
+    "ERROR: Failed to fetch token after 30 attempts (150 s). "
+    "Check Private Google Access on subnet and secretmanager.secretAccessor IAM binding.\n"
+    "Last error: " + str(last_err) + "\n"
+)
+sys.exit(1)
+PYEOF
+)
+
+if [ -z "$TOKEN" ]; then
+  log "ERROR: Decoded registration token is empty. Exiting."
+  exit 1
+fi
+
+log "Registration token retrieved successfully."
+
+# ─── Register the publisher with Netskope ─────────────────────────────────────
+# npa_publisher_wizard is extracted from the Docker image by bootstrap.sh
+# (configure_publisher_wizard_to_start_on_boot) and placed at ~/npa_publisher_wizard.
+log "Running NPA Publisher wizard for ${publisher_name}..."
+
+cd /home/ubuntu
+if sudo ./npa_publisher_wizard -token "$TOKEN"; then
+  log "NPA Publisher wizard completed successfully."
+else
+  WIZARD_EXIT=$?
+  log "ERROR: NPA Publisher wizard exited with code $WIZARD_EXIT."
+  unset TOKEN
+  exit $WIZARD_EXIT
+fi
+
+unset TOKEN
+
+log "=== NPA Publisher ${publisher_name} startup complete ==="
