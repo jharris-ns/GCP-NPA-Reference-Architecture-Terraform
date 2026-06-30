@@ -13,6 +13,7 @@ Day-2 operational procedures for managing NPA Publisher deployments on GCP with 
 - [Import Existing Resources](#import-existing-resources)
 - [Backup and Restore](#backup-and-restore)
 - [Monitoring and Alerts](#monitoring-and-alerts)
+- [Decommissioning](#decommissioning)
 
 ## Publisher Upgrades
 
@@ -440,6 +441,32 @@ terraform plan -detailed-exitcode
 # Exit code 1: Error
 # Exit code 2: Changes detected
 ```
+
+## Decommissioning
+
+`terraform destroy` consistently requires two passes due to a race between VM termination and the Netskope publisher delete API call.
+
+### Why Two Passes Are Needed
+
+Terraform destroys GCP resources and Netskope records in dependency order: VMs are terminated before the Netskope publisher records are deleted. However, GCE instance deletion takes 60–90 seconds, and the Netskope API rejects deletion of a publisher that is still marked **connected**. By the time Terraform reaches the publisher delete, the VM may still be reporting a heartbeat. The first `terraform destroy` exits with code 1 after successfully removing all GCP resources.
+
+Within a few minutes of VM termination, Netskope marks the publishers as **disconnected**. Re-running `terraform destroy` then removes the remaining publisher records cleanly.
+
+### Procedure
+
+```bash
+# Pass 1 — removes all GCP resources; exits with error on Netskope publisher delete
+terraform destroy
+
+# Wait ~2 minutes for publishers to show "disconnected" in Netskope UI, then:
+
+# Pass 2 — removes the remaining Netskope publisher records
+terraform destroy
+```
+
+After pass 2, `terraform state list` returns nothing.
+
+> **Before destroying**: remove all private app associations from each publisher in the Netskope UI (**Settings → Security Cloud Platform → Private Apps**). A publisher with active app associations cannot be deleted by the API even when disconnected.
 
 ## Additional Resources
 

@@ -96,19 +96,30 @@ Common apply errors:
 | `CIDR conflict` | Subnet CIDR overlaps existing | Change `subnet_cidr` value |
 | `publisher_count must be >= 2` | Tried to set count to 1 | Minimum is 2 for HA |
 
-### Issue: terraform destroy Fails
+### Issue: terraform destroy Fails on First Run
 
-**Symptom:** `Error: Error deleting publisher` — publisher is **Connected** in Netskope
+**Symptom:** `Error: Error deleting publisher` — publisher is **Connected** in Netskope. All GCP resources are gone but `terraform state list` still shows `netskope_npa_publisher.this[...]`.
 
-**Cause:** Netskope rejects API deletion of a publisher that has active connections or that still has private apps associated with it.
+**Cause (expected):** This is normal behaviour, not a bug. GCE instance deletion takes 60–90 seconds. Terraform destroys instances and Netskope publisher records in parallel — by the time the API delete runs, the VM may still be reporting a heartbeat and Netskope rejects deletion of a connected publisher. A second `terraform destroy` a few minutes later succeeds once the publishers show **disconnected**.
 
-> **Before deleting a publisher**: remove all private app associations in the Netskope UI (**Settings → Security Cloud Platform → Private Apps → edit each app → remove the publisher**). A publisher with associated private apps cannot be deleted even if it is disconnected.
+**Recovery (standard two-pass procedure):**
 
-**Solution:**
-1. Remove any private app associations, then disconnect the publisher in Netskope UI (**Settings → Security Cloud Platform → Publishers → Disconnect**)
-2. Or remove it from Terraform state and delete it manually:
+```bash
+# Pass 1 already ran — GCP resources are gone, publishers still in state.
+# Wait ~2 minutes for publishers to disconnect, then:
+terraform destroy
+# Destroy complete! Resources: 2 destroyed.
+```
+
+**Cause (unexpected — publisher stuck connected):** If publishers remain connected longer than ~5 minutes after instance termination, or if they have private app associations:
+
+> **Before deleting a publisher**: remove all private app associations in the Netskope UI (**Settings → Security Cloud Platform → Private Apps → edit each app → remove the publisher**). A publisher with associated private apps cannot be deleted even when disconnected.
+
+1. Check and remove private app associations in the Netskope UI
+2. Manually disconnect in Netskope UI (**Settings → Security Cloud Platform → Publishers → Disconnect**)
+3. Or remove from state and delete via API:
    ```bash
-   # Remove from Terraform state (resource still exists in GCP/Netskope)
+   # Remove from Terraform state (resource still exists in Netskope)
    terraform state rm 'netskope_npa_publisher.this["my-publisher"]'
    terraform state rm 'netskope_npa_publisher_token.this["my-publisher"]'
 
@@ -116,9 +127,6 @@ Common apply errors:
    curl -X DELETE \
      -H "Netskope-Api-Token: $TF_VAR_netskope_api_key" \
      "$TF_VAR_netskope_server_url/infrastructure/publishers/PUBLISHER_ID"
-
-   # Run destroy again (only deletes remaining GCP resources)
-   terraform destroy
    ```
 
 ## Netskope Provider Issues

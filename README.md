@@ -151,13 +151,13 @@ Publisher instances require specific outbound access. No inbound rules are neede
 
 ### On `terraform destroy`
 
-Terraform enforces correct destroy ordering via explicit `depends_on`:
+`terraform destroy` requires two passes due to a race between VM termination and the Netskope API:
 
-1. **Compute Engine instances terminated first** — disconnects publishers from Netskope
-2. **Secret versions destroyed** from Secret Manager
-3. **Publisher records deleted** from Netskope via the API (succeeds because instances are already gone)
+1. **Pass 1**: Compute Engine instances are terminated, Secret Manager versions are destroyed, and Netskope publisher records are deleted. The Netskope deletes fail with a 422 error if the VMs (which take 60–90 seconds to terminate) are still reporting a heartbeat. All GCP resources are removed; only the Netskope publisher records remain in state.
+2. **Wait ~2 minutes** for the publishers to show **Disconnected** in Netskope.
+3. **Pass 2**: `terraform destroy` removes the remaining publisher records. State is empty.
 
-> **Note**: Netskope rejects deletion of a publisher that is still **connected** or has **private app associations**. If a publisher shows connected at destroy time, wait for it to disconnect (instance is terminated) then re-run `terraform destroy`. Remove all private app associations in the Netskope UI before deleting a publisher.
+> **Before destroying**: remove all private app associations from each publisher (**Settings → Security Cloud Platform → Private Apps**) — a publisher with active app associations cannot be deleted by the API even when disconnected.
 
 ## Getting Started
 
