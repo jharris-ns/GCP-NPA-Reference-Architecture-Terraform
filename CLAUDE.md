@@ -32,10 +32,12 @@ tflint
 
 ## Architecture
 
-This is a Terraform module that deploys Netskope NPA (Network Private Access) Publishers to AWS with multi-AZ redundancy. It uses **two providers** (AWS + Netskope) that coordinate in sequence:
+This is a Terraform module that deploys Netskope NPA (Network Private Access) Publishers to GCP with multi-zone redundancy. It uses **two providers** (Google + Netskope) that coordinate in sequence:
 
 1. **Netskope provider** creates publisher records and generates registration tokens (`netskope.tf`)
-2. **AWS provider** creates infrastructure, launches EC2 instances, and registers publishers via SSM Run Command (`ec2_publisher.tf` + `ssm.tf`)
+2. **Google provider** creates infrastructure and launches Compute Engine instances (`compute_publisher.tf`, `vpc.tf`, `iam.tf`, `secrets.tf`)
+
+Registration is handled by the VM's own startup script at first boot — no separate automation role or external orchestration is needed.
 
 ### Directory Layout
 
@@ -44,28 +46,28 @@ This is a Terraform module that deploys Netskope NPA (Network Private Access) Pu
 
 ### Key Cross-File Patterns
 
-**Conditional VPC** (`locals.tf` → all resource files): The module supports creating a new VPC or using an existing one. `locals.tf` resolves `local.vpc_id` and `local.private_subnet_ids` from either created or existing resources, so downstream files never check `var.create_vpc` directly.
+**Conditional VPC** (`locals.tf` → all resource files): The module supports creating a new VPC or using an existing one. `locals.tf` resolves `local.network_self_link` and `local.subnet_self_links` from either created or existing resources, so downstream files never check `var.create_vpc` directly.
 
-**Publisher map** (`locals.tf` → `netskope.tf` → `ec2_publisher.tf`): `local.publishers` generates a name-keyed map from `var.publisher_count`. All publisher resources use `for_each = local.publishers` so state addresses are human-readable (`aws_instance.publisher["my-pub-2"]`) and removing a publisher doesn't cascade.
+**Publisher map** (`locals.tf` → `netskope.tf` → `compute_publisher.tf`): `local.publishers` generates a name-keyed map from `var.publisher_count`. All publisher resources use `for_each = local.publishers` so state addresses are human-readable (`google_compute_instance.publisher["my-pub-2"]`) and removing a publisher doesn't cascade.
 
-**AZ distribution**: Publishers spread across AZs via modulo: `subnet_id = local.private_subnet_ids[each.value.index % length(local.private_subnet_ids)]`
+**Zone distribution**: Publishers spread across zones via modulo: `zone = local.zones[each.value.index % length(local.zones)]`
 
-**Token flow**: `netskope_npa_publisher_token.this[each.key].token` → `aws_ssm_parameter.publisher_token` (SecureString) → `null_resource.publisher_registration` fetches token locally via AWS CLI → SSM Run Command executes `/home/ubuntu/npa_publisher_wizard -token <TOKEN>` on the instance. User data is minimal (CloudWatch agent only if enabled).
+**Token flow**: `netskope_npa_publisher_token.this[each.key].token` → `google_secret_manager_secret_version.publisher_token` → startup script fetches the token from Secret Manager using the VM's service account identity (Python3 urllib via the GCP metadata server) → `/home/ubuntu/npa_publisher_wizard` runs on the instance and consumes the token.
 
 ## Terraform Conventions
 
-### File Structure (AWS I&A Standards)
+### File Structure
 
 - All Terraform code lives in the `terraform/` directory
 - Core files: `main.tf`, `variables.tf`, `outputs.tf`, `providers.tf`, `versions.tf`
 - Optional files: `data.tf`, `locals.tf`, `backend.tf`
-- Split service-specific resources into their own files (e.g. `iam.tf`, `vpc.tf`, `ec2.tf`, `security.tf`) when they exceed ~150 lines
+- Split service-specific resources into their own files (e.g. `iam.tf`, `vpc.tf`, `compute_publisher.tf`, `secrets.tf`) when they exceed ~150 lines
 - Optional directories: `terraform/templates/` (for templatefile templates)
 
 ### Naming
 
 - snake_case for all resource names, variables, and outputs
-- Resource meta-names should be contextual and descriptive (e.g. `data "aws_region" "current"`, not `"self"`)
+- Resource meta-names should be contextual and descriptive (e.g. `data "google_compute_zones" "available"`, not `"self"`)
 
 ### Variables & Outputs
 
@@ -78,8 +80,8 @@ This is a Terraform module that deploys Netskope NPA (Network Private Access) Pu
 
 - Prefer `for_each` over `count` for multi-instance resources (prevents cascading state changes)
 - Use `count` only for simple on/off toggles (0 or 1)
-- Use attachment resources over inline blocks (e.g. `aws_iam_role_policy_attachment` instead of inline `policy`)
-- Use `default_tags` on the AWS provider for consistent tagging across all resources
+- Use attachment resources over inline blocks (e.g. `google_project_iam_member` instead of inline bindings)
+- GCP does not support provider-level default labels — use `local.common_labels` merged into each resource's `labels` block
 
 ### Code Quality
 
