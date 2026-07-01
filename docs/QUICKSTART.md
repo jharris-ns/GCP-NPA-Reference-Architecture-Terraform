@@ -46,7 +46,7 @@ gcloud services enable \
   --project=YOUR_PROJECT_ID
 ```
 
-> **No Marketplace subscription required.** Unlike the AWS implementation, GCP uses Ubuntu 22.04 LTS as the base image. The Netskope NPA Publisher software is installed at first boot via Netskope's bootstrap script. No Marketplace image subscription is needed.
+> **No Marketplace subscription required.** This deployment uses Ubuntu 22.04 LTS as the base image. The Netskope NPA Publisher software is installed at first boot via Netskope's bootstrap script.
 
 ## Quick Deploy
 

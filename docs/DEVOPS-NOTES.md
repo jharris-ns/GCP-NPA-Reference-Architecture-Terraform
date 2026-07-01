@@ -10,7 +10,7 @@ Technical deep-dive into the Terraform patterns, Netskope provider integration, 
 - [Conditional Resource Creation](#conditional-resource-creation)
 - [Startup Script Template](#startup-script-template)
 - [IAM Configuration](#iam-configuration)
-- [GCP vs AWS Design Decisions](#gcp-vs-aws-design-decisions)
+- [GCP Design Decisions](#gcp-design-decisions)
 - [Deployment Flow](#deployment-flow)
 - [Resource Dependencies](#resource-dependencies)
 - [Pre-commit Hooks and Code Quality](#pre-commit-hooks-and-code-quality)
@@ -30,7 +30,7 @@ provider "netskope" {
 }
 ```
 
-This is identical to the AWS implementation. The Netskope provider is cloud-agnostic.
+The Netskope provider is cloud-agnostic.
 
 ### Authentication
 
@@ -337,24 +337,14 @@ Note: Shell variable references within the template use `$${...}` (double `$`) t
 
 ## IAM Configuration
 
-### Service Account Pattern (No Instance Profile Wrapper)
+### Service Account Pattern
 
-GCP collapses the AWS three-resource pattern (Role + Instance Profile + Attachments) into a simpler structure:
+A service account is attached directly to the Compute Engine instance — no wrapper resource is required:
 
-**AWS pattern:**
-```
-aws_iam_role.publisher
-  └─► aws_iam_instance_profile.publisher  ← required wrapper
-        └─► aws_instance.publisher (iam_instance_profile)
-```
-
-**GCP pattern:**
 ```
 google_service_account.publisher
   └─► google_compute_instance.publisher (service_account.email)
 ```
-
-No "instance profile" wrapper resource exists in GCP. The service account is attached directly.
 
 ### IAM Binding Granularity
 
@@ -372,46 +362,35 @@ resource "google_secret_manager_secret_iam_member" "publisher_token_access" {
 
 This ensures publisher VM can read only its own registration token, not other publishers' tokens.
 
-### No SSM Automation Role Equivalent
+### Registration Without a Separate Automation Role
 
-The AWS architecture required a separate "SSM Automation role" to resolve registration tokens server-side without transiting the operator workstation. In GCP, this role is eliminated:
+The VM's startup script runs as the VM's service account and fetches the token directly from Secret Manager using the metadata server identity. The token never transits the operator workstation — it goes directly from Secret Manager to instance memory within GCP.
 
-- The VM's startup script runs as the VM's service account
-- The service account fetches the token from Secret Manager using its GCP metadata server identity
-- The token never transits the operator workstation — it goes directly from Secret Manager to instance memory within GCP
-
-This is equivalent security with a simpler IAM structure.
-
-## GCP vs AWS Design Decisions
+## GCP Design Decisions
 
 ### No Public Subnets
 
-AWS requires public subnets + Internet Gateway + route tables for NAT Gateway public IPs. GCP collapses this: Cloud NAT is a regional service that handles all egress for instances without external IPs. There are no public subnets in this architecture.
+Cloud NAT is a regional service that handles all egress for instances without external IPs. There are no public subnets, internet gateway resources, or per-zone NAT resources in this architecture.
 
 ### Firewall Rules Are VPC-Level, Not Per-Instance
 
-AWS security groups are attached to instances at creation. GCP firewall rules are applied to the VPC and target instances via network tags (`["npa-publisher"]` on the VM, `target_tags = ["npa-publisher"]` on the rule). The instance does not reference the firewall rule directly.
+GCP firewall rules are applied to the VPC and target instances via network tags (`["npa-publisher"]` on the VM, `target_tags = ["npa-publisher"]` on the rule). The instance does not reference the firewall rule directly.
 
-### Private Google Access Replaces VPC Endpoints
+### Private Google Access
 
-The AWS architecture requires three VPC Interface Endpoints (ssm, ssmmessages, ec2messages) for instances to reach AWS APIs without internet access. GCP replaces this with `private_ip_google_access = true` on the subnet — a single subnet attribute enables access to all Google APIs without internet or VPC endpoints.
+Setting `private_ip_google_access = true` on the subnet enables instances without external IPs to reach all Google APIs (Secret Manager, Cloud Logging, Cloud Monitoring) without traversing Cloud NAT. No interface endpoint resources are needed.
 
-### IAP TCP Tunnel Replaces SSM Session Manager
+### IAP TCP Tunnel for Shell Access
 
-| Feature | AWS | GCP |
-|---|---|---|
-| Shell access without public IP | SSM Session Manager (IAM-controlled) | IAP TCP tunnel (IAM + firewall rule) |
-| Access method | `aws ssm start-session --target INSTANCE_ID` | `gcloud compute ssh --tunnel-through-iap INSTANCE_NAME --zone ZONE` |
-| GCP firewall rule needed | No (SSM is IAM-only) | Yes (`35.235.240.0/20` → port 22) |
-| Access control | IAM policy on the instance | `roles/iap.tunnelResourceAccessor` + firewall rule |
+`gcloud compute ssh --tunnel-through-iap INSTANCE_NAME --zone ZONE` provides interactive access to instances without a public IP, bastion host, or open SSH port. Access is controlled via `roles/iap.tunnelResourceAccessor` plus the firewall rule allowing `35.235.240.0/20` → port 22.
 
-### GCS Backend Has No DynamoDB Equivalent
+### GCS Backend Locking
 
-Terraform's GCS backend implements state locking natively via GCS object conditional updates. The AWS architecture requires a separate DynamoDB table for locking. The GCS backend eliminates this resource.
+Terraform's GCS backend implements state locking natively via GCS object conditional updates. A single GCS bucket is the only state backend resource required.
 
 ### Default Disk Encryption
 
-GCP encrypts all persistent disk data at rest by default (Google-managed keys). This is equivalent to the AWS `root_block_device { encrypted = true }` setting — it's the default and doesn't need to be configured. CMEK via `disk_encryption_key` block can be added for customer-managed keys if required.
+GCP encrypts all persistent disk data at rest by default with Google-managed keys. CMEK via `disk_encryption_key` block can be added if customer-managed keys are required.
 
 ## Deployment Flow
 
@@ -659,7 +638,7 @@ terraform {
 }
 ```
 
-Note: The `null` provider is not used in this GCP implementation. Publisher registration is handled by the VM's startup script (no `null_resource` polling loop needed, unlike the AWS implementation).
+Note: The `null` provider is not used. Publisher registration is handled entirely by the VM's startup script.
 
 ### Lock File
 

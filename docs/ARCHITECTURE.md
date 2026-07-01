@@ -38,8 +38,8 @@ GCP reference architecture for deploying Netskope Private Access (NPA) Publisher
 │  │               Terraform State Backend (Optional)                      │  │
 │  │                                                                       │  │
 │  │  ┌──────────────┐  ┌──────────────┐                                  │  │
-│  │  │  GCS Bucket  │  │   KMS Key    │  No DynamoDB needed —            │  │
-│  │  │ (State File) │  │ (Encryption) │  GCS backend locks natively      │  │
+│  │  │  GCS Bucket  │  │   KMS Key    │  Locking built into GCS backend  │  │
+│  │  │ (State File) │  │ (Encryption) │                                  │  │
 │  │  └──────────────┘  └──────────────┘                                  │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
@@ -77,8 +77,6 @@ GCP reference architecture for deploying Netskope Private Access (NPA) Publisher
                  └───────────────────────────────┘
 ```
 
-**Key simplification vs. AWS:** There are no public subnets, no per-zone NAT gateways, and no internet gateway resource. Cloud NAT is a single regional resource covering all zones.
-
 ## Component Overview
 
 ### VPC and Subnet Design
@@ -86,12 +84,12 @@ GCP reference architecture for deploying Netskope Private Access (NPA) Publisher
 **GCP best practice**: GCP VPCs are global resources; subnets are regional. There is no concept of a "public subnet" in GCP — privacy is determined by whether a VM has an external IP assigned, not which subnet it is in.
 
 - **VPC** (`google_compute_network`): Global network resource. Only created when `create_vpc = true`; an existing VPC can be supplied instead via `existing_network_self_link`.
-- **Subnet** (`google_compute_subnetwork`): Regional subnet with `private_ip_google_access = true`, enabling VMs without external IPs to reach GCP APIs (Secret Manager, Cloud Logging, Cloud Monitoring) without Cloud NAT or VPC Endpoints.
+- **Subnet** (`google_compute_subnetwork`): Regional subnet with `private_ip_google_access = true`, enabling VMs without external IPs to reach GCP APIs (Secret Manager, Cloud Logging, Cloud Monitoring) without traversing Cloud NAT.
 - **CIDR**: Configurable via `subnet_cidr` (default: `10.0.0.0/24`).
 
 ### Cloud Router and Cloud NAT
 
-**GCP best practice**: Cloud NAT is a regional service — a single NAT resource provides outbound internet for all zones in a region, unlike AWS where one NAT Gateway per AZ is required for zone isolation.
+**GCP best practice**: Cloud NAT is a regional service — a single NAT resource provides outbound internet for all zones in a region.
 
 - **Cloud Router** (`google_compute_router`): Regional BGP router required by Cloud NAT.
 - **Cloud NAT** (`google_compute_router_nat`): Regional NAT with auto-allocated IPs. Provides outbound internet for all publisher VMs across zones. SLA: 99.99%.
@@ -114,7 +112,7 @@ GCP reference architecture for deploying Netskope Private Access (NPA) Publisher
 **GCP best practice**: Firewall rules are applied to the VPC and scoped to VMs via network tags, not attached to instances directly.
 
 - **Egress rule**: All outbound traffic allowed from VMs tagged `npa-publisher`. Publishers must reach Netskope NewEdge, DNS, and package repositories.
-- **IAP SSH rule**: Ingress from `35.235.240.0/20` on port 22, targeted to `npa-publisher` tag. Required for `gcloud compute ssh --tunnel-through-iap` access. No equivalent is needed in AWS because SSM Session Manager is purely IAM-controlled.
+- **IAP SSH rule**: Ingress from `35.235.240.0/20` on port 22, targeted to `npa-publisher` tag. Required for `gcloud compute ssh --tunnel-through-iap` access.
 - **No ingress rule**: Publishers only initiate outbound connections — zero inbound attack surface.
 
 ### IAM and Service Account
@@ -130,7 +128,7 @@ GCP reference architecture for deploying Netskope Private Access (NPA) Publisher
 
 ### Secret Manager (Registration Tokens)
 
-Replaces AWS SSM Parameter Store. The Netskope registration token is stored as a Secret Manager secret version per publisher.
+The Netskope registration token is stored as a Secret Manager secret version per publisher.
 
 - **`google_secret_manager_secret`**: One secret per publisher (named `<publisher-name>-registration-token`).
 - **`google_secret_manager_secret_version`**: Stores the token value (from `netskope_npa_publisher_token.this[key].token`).
@@ -140,7 +138,7 @@ Replaces AWS SSM Parameter Store. The Netskope registration token is stored as a
 
 ### Netskope Provider
 
-The Netskope Terraform provider creates publisher records and generates one-time registration tokens. It does not manage any GCP infrastructure. Identical to the AWS implementation.
+The Netskope Terraform provider creates publisher records and generates one-time registration tokens. It does not manage any GCP infrastructure.
 
 - `netskope_npa_publisher`: Creates publisher records in the Netskope tenant.
 - `netskope_npa_publisher_token`: Generates one-time registration tokens.
@@ -148,7 +146,7 @@ The Netskope Terraform provider creates publisher records and generates one-time
 
 ### Terraform State Backend (Optional)
 
-**GCP advantage over AWS**: The GCS backend has native state locking — no DynamoDB equivalent is needed.
+The GCS backend implements state locking natively via object conditional updates.
 
 - **GCS Bucket**: Encrypted state file storage with versioning. Locking via GCS object conditional updates.
 - **KMS Key** (optional): Customer-managed encryption key for the state bucket.
@@ -189,7 +187,7 @@ GCP APIs (private.googleapis.com)
 ```
 - **Port**: HTTPS (443)
 - **Purpose**: Registration token retrieval, log/metric delivery
-- Private Google Access replaces the three AWS VPC Endpoints (`ssm`, `ssmmessages`, `ec2messages`). No VPC endpoint resources needed.
+- Private Google Access keeps GCP API traffic on Google's network. No VPC endpoint resources are needed.
 
 #### 4. Operator Shell Access (Diagnostics)
 ```
@@ -238,7 +236,7 @@ Egress Rules:
 
 **Private Google Access:**
 - VMs reach GCP APIs without external IPs or Cloud NAT
-- Replaces AWS VPC Endpoints — no interface endpoint resources needed
+- No interface endpoint resources needed
 
 ### Layer 2: Identity and Access Management
 
@@ -261,7 +259,7 @@ Egress Rules:
 - **At rest**: GCS default encryption (Google-managed) or CMEK.
 - **Access control**: IAM policies on the GCS bucket.
 - **Versioning**: GCS versioning for state recovery.
-- **Locking**: Built into GCS backend — no DynamoDB needed.
+- **Locking**: Built into GCS backend natively.
 
 **Secret Manager:**
 - All secret versions encrypted at rest by Google by default.
@@ -279,7 +277,7 @@ Egress Rules:
 
 ### Layer 5: Shielded VM (Boot Integrity)
 
-GCP Shielded VM replaces AWS IMDSv2 + Nitro Enclaves as the platform security baseline.
+Shielded VM is the platform security baseline for Compute Engine instances.
 
 ```hcl
 shielded_instance_config {
@@ -341,7 +339,7 @@ scheduling {
 
 #### Cloud NAT: Regional vs. Per-Zone
 
-Unlike AWS (one NAT Gateway per AZ for zone isolation), Cloud NAT is regional — a single `google_compute_router_nat` serves all zones. Zone-level failure isolation is handled internally by GCP. SLA: 99.99%.
+Cloud NAT is regional — a single `google_compute_router_nat` serves all zones. Zone-level failure isolation is handled internally by GCP. SLA: 99.99%.
 
 #### Failure Scenarios and Recovery
 
@@ -358,7 +356,7 @@ Unlike AWS (one NAT Gateway per AZ for zone isolation), Cloud NAT is regional �
 **Scenario 3: Cloud NAT Failure**
 - **Impact**: All zones lose outbound internet (regional resource)
 - **Recovery**: GCP restores Cloud NAT (99.99% SLA)
-- **Note**: This is the trade-off vs. AWS per-AZ NAT Gateways — regional scope means zone failures don't isolate egress, but rare regional NAT failures affect all zones
+- **Note**: Regional scope means zone failures don't isolate egress, but rare regional NAT failures affect all zones
 
 **Scenario 4: Region-Wide Failure**
 - **Impact**: Entire deployment unavailable

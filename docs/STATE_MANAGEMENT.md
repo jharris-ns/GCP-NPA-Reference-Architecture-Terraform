@@ -1,6 +1,6 @@
 # Terraform State Management
 
-Guide to managing Terraform state for the NPA Publisher deployment on GCP. The GCS backend is simpler than the AWS S3+DynamoDB+KMS backend because state locking is built in — no DynamoDB equivalent is required.
+Guide to managing Terraform state for the NPA Publisher deployment on GCP.
 
 ## Table of Contents
 
@@ -99,17 +99,9 @@ On macOS, enable FileVault. On Linux, use LUKS or similar disk encryption.
 
 ## Remote State with GCS
 
-### Why GCS is Simpler Than S3 + DynamoDB + KMS
+### Why GCS Remote State?
 
-The Terraform GCS backend provides native state locking — no separate DynamoDB table is required. This makes GCS significantly simpler to set up compared to the AWS S3+DynamoDB+KMS backend.
-
-| Feature | AWS Backend | GCP Backend |
-|---|---|---|
-| State storage | S3 bucket | GCS bucket |
-| State locking | DynamoDB table (separate resource) | **Built into GCS backend** |
-| Encryption at rest | Customer KMS key (separate resource) | Google-managed by default; CMEK via bucket setting |
-| Versioning | S3 versioning (explicit setting) | GCS object versioning (explicit setting) |
-| Resources needed | 3 (S3 + DynamoDB + KMS) | 1 (GCS bucket) |
+The Terraform GCS backend provides native state locking via object conditional updates — no separate locking resource is required. A single GCS bucket is all that is needed.
 
 ### Benefits Over Local State
 
@@ -175,7 +167,7 @@ echo "  prefix = \"npa-publishers\""
 
 ### CMEK Encryption (Optional)
 
-For customer-managed encryption keys (equivalent of AWS KMS + S3 SSE):
+For customer-managed encryption keys (CMEK):
 
 ```bash
 # Create a key ring and crypto key
@@ -575,9 +567,7 @@ The GCS state backend costs essentially nothing for this use case:
 | **GCS Operations** | ~$0.00/month | Very infrequent read/write operations |
 | **CMEK Key** (optional) | ~$0.06/month per key version | Only if using Cloud KMS for CMEK |
 
-**Total: ~$0.00-0.06/month** (vs. ~$1.02/month for the AWS S3+DynamoDB+KMS backend)
-
-The GCS backend eliminates the $1.00/month KMS key cost from the AWS architecture unless CMEK is explicitly required.
+**Total: ~$0.00-0.06/month** (CMEK adds ~$0.06/month per key version if required)
 
 ## Additional Resources
 

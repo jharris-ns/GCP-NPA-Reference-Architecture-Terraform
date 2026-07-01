@@ -252,7 +252,7 @@ gcloud logging read \
 
 ## Connecting to Publisher Instances
 
-Publishers have no external IP. Access is via IAP TCP tunneling (the GCP equivalent of SSM Session Manager).
+Publishers have no external IP. Access is via IAP TCP tunneling.
 
 ### Get the SSH Command
 

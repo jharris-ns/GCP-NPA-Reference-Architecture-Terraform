@@ -19,7 +19,7 @@ This deployment uses two IAM identities:
 1. **Publisher VM Service Account** — attached to each Compute Engine instance; used by the startup script and Ops Agent. Managed by Terraform.
 2. **Terraform Operator** — the person or service account running `terraform apply`. Must have permissions to create and manage GCP and Netskope resources. Configured outside this module.
 
-This is simpler than the AWS architecture, which required three IAM roles (instance role, SSM Automation role, Terraform operator). In GCP, the SSM Automation role is eliminated because registration is handled by the VM's own startup script using its service account identity.
+Registration is handled by the VM's own startup script running as its service account, so no separate automation role is needed.
 
 ## Publisher VM Service Account
 
@@ -36,10 +36,9 @@ Terraform creates and manages the publisher VM service account in `iam.tf`. The 
 
 ### Why Secret Access Is Per-Secret, Not Project-Wide
 
-The `secretmanager.secretAccessor` binding is applied to each publisher's registration token secret individually (not at the project level). This mirrors the AWS SSM Automation role's resource-scoped permission:
+The `secretmanager.secretAccessor` binding is applied to each publisher's registration token secret individually (not at the project level):
 
-- AWS: `ssm:GetParameter` on `arn:aws:ssm:<region>:<account>:parameter/npa/publishers/*/registration-token`
-- GCP: `roles/secretmanager.secretAccessor` on `projects/PROJECT/secrets/<name>-registration-token`
+- Binding: `roles/secretmanager.secretAccessor` on `projects/PROJECT/secrets/<name>-registration-token`
 
 This ensures that a compromised publisher VM cannot read other publishers' registration tokens.
 
@@ -94,7 +93,7 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 
 ## Recommended: Custom Deployment Role
 
-A custom role scoped to exactly the permissions Terraform needs. This is the GCP equivalent of the `NPAPublisherTerraformPolicy` in the AWS architecture.
+A custom role scoped to exactly the permissions Terraform needs.
 
 ### Required Permissions List
 
@@ -291,7 +290,7 @@ terraform apply
 
 ## CI/CD with Workload Identity Federation
 
-Workload Identity Federation is the recommended approach for CI/CD pipelines. It is the GCP equivalent of the AWS IAM OIDC trust policy — no service account key file is needed.
+Workload Identity Federation is the recommended approach for CI/CD pipelines. No service account key file is needed.
 
 ### GitHub Actions Example
 

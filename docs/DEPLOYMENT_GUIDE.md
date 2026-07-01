@@ -116,7 +116,7 @@ terraform output iap_ssh_commands
 
 ## Path B: Remote State + New VPC
 
-The recommended path for teams and production deployments. GCS provides native state locking — no DynamoDB equivalent is required.
+The recommended path for teams and production deployments. GCS provides native state locking.
 
 ### Step 1: Create the GCS State Bucket
 
